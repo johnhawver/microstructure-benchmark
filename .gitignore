@@ -1,0 +1,10 @@
+.venv/
+.env
+data/raw/
+data/parquet/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+wandb/
+.pytest_cache/
+microstructure_benchmark_plan.md
