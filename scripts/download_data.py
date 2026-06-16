@@ -5,6 +5,11 @@ import databento as db
 import polars as pl
 from src.data_io import write_parquet
 from src.config import DATASET, SYMBOL, DATA_START, DATA_END, BUDGET_USD
+from datetime import datetime
+from pathlib import Path
+from src.config import PARQUET_DIR
+import time
+import pandas as pd
 
 client = db.Historical(os.environ["DATABENTO_API_KEY"])
 
@@ -38,9 +43,9 @@ def main():
     window_cost = estimate_cost(DATA_START, DATA_END, "mbp-1")
     if window_cost > BUDGET_USD:
         raise RuntimeError(f"MBP-1 window cost ${window_cost:.6f} is greater than budget ${BUDGET_USD:.2f} — aborting")
+
+    download_window(DATA_START, DATA_END)
         
-    df = download_mbp1(start="2025-09-02T13:30:00", end="2025-09-02T13:40:00")
-    write_parquet(df, "data/parquet/mnq_mbp1_2025-09-02_smoke.parquet")
 
 
 def download_mbp1(start: str, end: str, 
@@ -58,6 +63,36 @@ def download_mbp1(start: str, end: str,
 def estimate_cost(start: str, end: str, schema: str) -> float:
     """Return the estimated USD cost of an MNQ continuous request for the given schema."""
     return client.metadata.get_cost(dataset=DATASET, symbols=[SYMBOL], schema=schema, stype_in="continuous", start=start, end=end)
+
+def download_day(date: str) -> Path:
+    """Download a day of data from Databento and save to Parquet files."""
+    out = PARQUET_DIR / f"mnq_mbp1_{date}.parquet"
+
+    if datetime.fromisoformat(date).weekday() == 5:
+        return out
+
+    start = f"{date}T00:00:00"
+    end = f"{date}T23:59:59"
+
+    df = download_mbp1(start=start, end=end)
+    write_parquet(df, out)
+    return out
+
+def download_window(start: str, end: str) -> Path:
+    """Download a window of data from Databento and save to Parquet files."""
+    paths = []
+    for date in pd.date_range(start=start, end=end, freq="D", inclusive="left"):
+        date_str = date.strftime("%Y-%m-%d")
+        path = PARQUET_DIR / f"mnq_mbp1_{date_str}.parquet"
+        if path.exists():
+            print(f"{date_str}: skip (already exists)")
+            paths.append(path)
+            continue
+        t0 = time.perf_counter()
+        download_day(date_str)
+        print(f"{date_str}: {time.perf_counter() - t0:.1f}s")
+        paths.append(path)
+    return paths
 
 
 if __name__ == "__main__":
