@@ -8,3 +8,4 @@ __pycache__/
 wandb/
 .pytest_cache/
 microstructure_benchmark_plan.md
+notes.md
