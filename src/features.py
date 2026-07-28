@@ -86,3 +86,51 @@ def add_microprice_tilt(lf: pl.LazyFrame) -> pl.LazyFrame:
     return lf.with_columns(
         ((pl.col("microprice") - pl.col("mid")) / pl.col("spread")).alias("microprice_tilt")
     )
+
+
+def compute_ofi_events(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Compute per-event Cont-Kukanov-Stoikov OFI on raw MBP-1 rows."""
+    lf = lf.with_columns(
+        pl.col("bid_sz").cast(pl.Int64),
+        pl.col("ask_sz").cast(pl.Int64),
+    )
+    bid_prev = pl.col("bid").shift(1).over(pl.col("ts_event").dt.date())
+    ask_prev = pl.col("ask").shift(1).over(pl.col("ts_event").dt.date())
+    bid_sz_prev = pl.col("bid_sz").shift(1).over(pl.col("ts_event").dt.date())
+    ask_sz_prev = pl.col("ask_sz").shift(1).over(pl.col("ts_event").dt.date())
+
+    e_bid = (
+        pl.when(pl.col("bid") > bid_prev)
+        .then(pl.col("bid_sz"))
+        .when(pl.col("bid") == bid_prev)
+        .then(pl.col("bid_sz") - bid_sz_prev)
+        .otherwise(-bid_sz_prev)
+    )
+    e_ask = (
+        pl.when(pl.col("ask") < ask_prev)
+        .then(pl.col("ask_sz"))
+        .when(pl.col("ask") == ask_prev)
+        .then(pl.col("ask_sz") - ask_sz_prev)
+        .otherwise(-ask_sz_prev)
+    )
+
+    return (
+        lf.sort("ts_event")
+        .with_columns((e_bid - e_ask).alias("ofi"))
+        .filter(pl.col("ofi").is_not_null())
+    )
+
+
+def aggregate_ofi_to_bars(lf_events: pl.LazyFrame, bar_ms: int) -> pl.LazyFrame:
+    """Sum per-event OFI into fixed bars; column name ofi_sum_{bar_ms}ms."""
+    col = f"ofi_sum_{bar_ms}ms"
+    return (
+        lf_events.sort("ts_event")
+        .group_by_dynamic(
+            "ts_event",
+            every=f"{bar_ms}ms",
+            closed="left",
+            label="left",
+        )
+        .agg(pl.col("ofi").sum().alias(col))
+    )

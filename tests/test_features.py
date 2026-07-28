@@ -66,3 +66,32 @@ def test_vol_and_tilt_on_synthetic_random_walk():
 
     assert abs(vol_mean - sigma) / sigma < 0.15
     assert -1.0 <= tilt_min <= tilt_max <= 1.0
+
+
+from src.features import (
+    add_microprice_tilt,
+    add_returns,
+    add_rolling_vol,
+    compute_ofi_events,
+    resample_to_bars,
+)
+def test_ofi_events_hand_rolled():
+    """5-row book fixture: OFI matches Cont-Kukanov-Stoikov by hand."""
+    # Row 0 = baseline (dropped). Then:
+    # 1) bid size 10→15, ask unchanged → e_bid=+5, e_ask=0 → ofi=5
+    # 2) bid price up, sz=8; ask size 10→12 → e_bid=+8, e_ask=+2 → ofi=6
+    # 3) ask price down, sz=5; bid unchanged → e_bid=0, e_ask=+5 → ofi=-5
+    # 4) bid price down (prev sz 8); ask unchanged → e_bid=-8, e_ask=0 → ofi=-8
+    start = datetime(2025, 9, 15, 14, 0, tzinfo=timezone.utc)
+    lf = pl.DataFrame(
+        {
+            "ts_event": [start + timedelta(milliseconds=100 * i) for i in range(5)],
+            "bid": [100.0, 100.0, 100.25, 100.25, 100.0],
+            "ask": [101.0, 101.0, 101.0, 100.75, 100.75],
+            "bid_sz": [10, 15, 8, 8, 3],
+            "ask_sz": [10, 10, 12, 5, 5],
+        }
+    ).lazy()
+
+    out = compute_ofi_events(lf).collect()
+    assert out["ofi"].to_list() == [5, 6, -5, -8]
