@@ -95,3 +95,60 @@ def test_ofi_events_hand_rolled():
 
     out = compute_ofi_events(lf).collect()
     assert out["ofi"].to_list() == [5, 6, -5, -8]
+
+from src.features import (
+    FEATURES,
+    add_autocorr,
+    add_kyle_lambda,
+    add_microprice_tilt,
+    add_returns,
+    add_rolling_vol,
+    add_spread_features,
+    add_trade_imbalance,
+    aggregate_ofi_to_bars,
+    compute_ofi_events,
+    resample_to_bars,
+)
+
+def _bar_features(bars_with_ofi100: pl.LazyFrame) -> pl.DataFrame:
+    """Same bar-level feature stack as build_feature_frame (after OFI join)."""
+    lf = bars_with_ofi100.with_columns(pl.col("ofi_sum_100ms").fill_null(0)).with_columns(
+        pl.col("ofi_sum_100ms").rolling_sum(10).alias("ofi_sum_1000ms"),
+        pl.col("ofi_sum_100ms").rolling_sum(50).alias("ofi_sum_5000ms"),
+    )
+    lf = add_returns(lf)
+    lf = add_rolling_vol(lf, [10, 50, 200])
+    lf = add_autocorr(lf, lag=1, window=50)
+    lf = add_microprice_tilt(lf)
+    lf = add_spread_features(lf)
+    lf = add_trade_imbalance(lf, [10, 50, 200])
+    lf = add_kyle_lambda(lf, 50)
+    return lf.select(["ts_event", *FEATURES]).collect()
+
+
+def test_features_are_causal():
+    """feature[t] must not change if we drop all rows after t (no future peek)."""
+    mbp = add_mid_and_spread(load_mbp1("2025-09-15", "2025-09-16")).filter(
+        (pl.col("ts_event") >= pl.lit("2025-09-15T14:00:00").str.to_datetime(time_zone="UTC"))
+        & (pl.col("ts_event") < pl.lit("2025-09-15T14:10:00").str.to_datetime(time_zone="UTC"))
+    )
+    bars = (
+        resample_to_bars(mbp, BAR_MS)
+        .join(aggregate_ofi_to_bars(compute_ofi_events(mbp), 100), on="ts_event", how="left")
+        .collect()
+    )
+
+    n = min(2_000, bars.height // 2)
+    assert n > 300  # enough rows for rolling windows
+
+    full = _bar_features(bars.lazy())
+    trunc = _bar_features(bars.head(n).lazy())
+
+    # add_returns drops the first bar → align on timestamp, not raw row index
+    matched = trunc.join(full, on="ts_event", how="inner", suffix="_full")
+    assert matched.height == trunc.height
+
+    for col in FEATURES:
+        assert matched[col].equals(matched[f"{col}_full"]), (
+            f"{col} changed when future bars were removed (lookahead)"
+        )
