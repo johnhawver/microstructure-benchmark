@@ -1,5 +1,8 @@
 """Train LSTM on days 1-10, evaluate on day 11, log to W&B.
 
+Full single split (Day 19):
+  .venv/bin/python scripts/run_single_split_lstm.py
+
 Sanity (Day 18 step 6):
   .venv/bin/python scripts/run_single_split_lstm.py --sanity
 """
@@ -8,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +39,8 @@ from src.models.lstm_model import (
     N_FEATURES,
     NUM_LAYERS,
     SEQ_LEN,
+    FeatureScaler,
+    MNQLSTM,
     SequenceDataset,
     train_lstm,
 )
@@ -45,6 +51,9 @@ N_TEST_DAYS = 1
 EPOCHS = 20
 LR = 1e-3
 BATCH_SIZE = 512
+MODELS_DIR = ROOT / "data" / "models"
+MODEL_PATH = MODELS_DIR / "lstm_split0.pt"
+SCALER_PATH = MODELS_DIR / "lstm_split0_scaler.npz"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -80,11 +89,11 @@ def _load_days(paths: list[Path]) -> pl.DataFrame:
     missing = [c for c in needed if c not in df.columns]
     if missing:
         raise ValueError(f"Missing columns in feature parquet: {missing}")
-    # Feature math can produce ±inf; SequenceDataset also skips non-finite windows.
+    # Feature math can produce NaN/±inf; Polars null ≠ NaN, so convert both then drop.
     n_before = df.height
     df = df.with_columns(
         [
-            pl.when(pl.col(c).is_infinite())
+            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
             .then(None)
             .otherwise(pl.col(c))
             .alias(c)
@@ -107,11 +116,21 @@ def _time_split_train_val(
     return df.head(n_train), df.tail(n_val)
 
 
+def _scale_features(df: pl.DataFrame, scaler: FeatureScaler) -> pl.DataFrame:
+    """Apply a fitted scaler to FEATURES columns; leave labels untouched."""
+    X = df.select(FEATURES).to_numpy()
+    X_scaled = scaler.transform(X)
+    return df.with_columns(
+        [pl.Series(name=FEATURES[i], values=X_scaled[:, i]) for i in range(len(FEATURES))]
+    )
+
+
 def _predict_probs(
     model, ds: SequenceDataset, batch_size: int = BATCH_SIZE
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (y_true class ids [N], probs [N, 3]) for a SequenceDataset."""
     device = next(model.parameters()).device
+    # shuffle=False: preserve time order for eval / metrics.
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
     ys: list[np.ndarray] = []
     probs: list[np.ndarray] = []
@@ -144,6 +163,14 @@ def _metrics(y_cls: np.ndarray, probs: np.ndarray) -> dict[str, float]:
     return {"accuracy": acc, "log_loss": ll, "auc_up_vs_down": auc}
 
 
+def _save_artifacts(model: MNQLSTM, scaler: FeatureScaler) -> None:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), MODEL_PATH)
+    scaler.save(SCALER_PATH)
+    print(f"Saved model  → {MODEL_PATH}")
+    print(f"Saved scaler → {SCALER_PATH}")
+
+
 def main() -> None:
     args = _parse_args()
     sanity = args.sanity
@@ -165,6 +192,12 @@ def main() -> None:
     train_all = _load_days(train_paths)
     train_df, val_df = _time_split_train_val(train_all, val_frac=0.2)
     test_df = _load_days(test_paths) if test_paths else val_df
+
+    # Fit scaler on train only (leakage if fit includes val/test).
+    scaler = FeatureScaler().fit(train_df.select(FEATURES).to_numpy())
+    train_df = _scale_features(train_df, scaler)
+    val_df = _scale_features(val_df, scaler)
+    test_df = _scale_features(test_df, scaler)
 
     train_ds = SequenceDataset(train_df, label_col=LABEL_COL)
     val_ds = SequenceDataset(val_df, label_col=LABEL_COL)
@@ -199,9 +232,11 @@ def main() -> None:
                 "batch_size": BATCH_SIZE,
                 "n_train_days": n_train_days,
                 "n_test_days": n_test_days,
+                "feature_scaling": "train_only_standard",
             },
         )
 
+    t0 = time.perf_counter()
     model = train_lstm(
         train_ds,
         val_ds,
@@ -210,6 +245,9 @@ def main() -> None:
         batch_size=BATCH_SIZE,
         patience=patience,
     )
+    train_seconds = time.perf_counter() - t0
+    print(f"Training wall time: {train_seconds:.1f}s ({train_seconds / 60:.2f} min)")
+
     y_cls, probs = _predict_probs(model, test_ds)
     metrics = _metrics(y_cls, probs)
 
@@ -220,10 +258,14 @@ def main() -> None:
     print("Confusion matrix (rows=true [-1,0,+1], cols=pred):")
     print(cm)
 
+    if not sanity:
+        _save_artifacts(model, scaler)
+
     if run is not None:
         wandb.log(
             {
                 **metrics,
+                "train_seconds": train_seconds,
                 "confusion_matrix": wandb.plot.confusion_matrix(
                     y_true=y_cls.tolist(),
                     preds=y_pred.tolist(),
@@ -235,6 +277,9 @@ def main() -> None:
             }
         )
         run.finish()
+
+    # Always print so notes.md can be updated even without W&B.
+    print(f"DAY19_TRAIN_SECONDS={train_seconds:.1f}")
 
 
 if __name__ == "__main__":

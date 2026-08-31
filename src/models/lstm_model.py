@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import torch
@@ -19,6 +21,57 @@ NUM_LAYERS = 2
 
 # Same class map as XGBoost: CrossEntropyLoss wants {0, 1, 2}.
 _LABEL_TO_CLASS = {-1: 0, 0: 1, 1: 2}
+
+# Avoid divide-by-zero on constant columns.
+_STD_EPS = 1e-8
+
+
+class FeatureScaler:
+    """Per-column (x - mean) / std. Fit on train only — never on val/test."""
+
+    def __init__(self) -> None:
+        self.mean_: np.ndarray | None = None
+        self.std_: np.ndarray | None = None
+
+    def fit(self, X: np.ndarray) -> FeatureScaler:
+        """Compute mean/std over finite rows. ``X`` shape ``[N, F]``."""
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2-D [N, F], got shape {X.shape}")
+        # nanmean/nanstd: a stray NaN must not poison an entire column.
+        self.mean_ = np.nanmean(X, axis=0)
+        std = np.nanstd(X, axis=0)
+        std = np.where(~np.isfinite(std) | (std < _STD_EPS), 1.0, std)
+        mean = np.where(np.isfinite(self.mean_), self.mean_, 0.0)
+        self.mean_ = mean
+        self.std_ = std
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Return float32 scaled array; same shape as ``X``."""
+        if self.mean_ is None or self.std_ is None:
+            raise RuntimeError("FeatureScaler must be fit before transform")
+        X = np.asarray(X, dtype=np.float64)
+        out = (X - self.mean_) / self.std_
+        return out.astype(np.float32, copy=False)
+
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        return self.fit(X).transform(X)
+
+    def save(self, path: str | Path) -> None:
+        if self.mean_ is None or self.std_ is None:
+            raise RuntimeError("FeatureScaler must be fit before save")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, mean=self.mean_, std=self.std_)
+
+    @classmethod
+    def load(cls, path: str | Path) -> FeatureScaler:
+        data = np.load(path)
+        scaler = cls()
+        scaler.mean_ = np.asarray(data["mean"], dtype=np.float64)
+        scaler.std_ = np.asarray(data["std"], dtype=np.float64)
+        return scaler
 
 
 class SequenceDataset(Dataset):
