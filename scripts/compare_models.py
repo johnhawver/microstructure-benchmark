@@ -1,6 +1,6 @@
-"""Day 20: XGBoost vs LSTM on the same single split (days 1-10 / day 11).
+"""XGBoost vs LSTM on the same single split (days 1-10 train / day 11 test).
 
-Trains XGB fresh; loads Day 19 LSTM + train-only scaler by default
+Trains XGB fresh; loads the saved LSTM + train-only scaler by default
 (use --retrain-lstm to train from scratch — ~1h on CPU).
 
   .venv/bin/python scripts/compare_models.py
@@ -64,7 +64,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--retrain-lstm",
         action="store_true",
-        help="Train LSTM from scratch instead of loading Day 19 checkpoint.",
+        help="Train LSTM from scratch instead of loading the saved checkpoint.",
     )
     p.add_argument("--no-wandb", action="store_true", help="Skip W&B logging.")
     return p.parse_args()

@@ -1,9 +1,9 @@
 """Train LSTM on days 1-10, evaluate on day 11, log to W&B.
 
-Full single split (Day 19):
+Full single split:
   .venv/bin/python scripts/run_single_split_lstm.py
 
-Sanity (Day 18 step 6):
+Sanity (one day, 5 epochs):
   .venv/bin/python scripts/run_single_split_lstm.py --sanity
 """
 
@@ -61,7 +61,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--sanity",
         action="store_true",
-        help="Day 18 step 6: one day only, 5 epochs (check train loss drops).",
+        help="One day only, 5 epochs (check train loss drops).",
     )
     p.add_argument("--epochs", type=int, default=None, help="Override epoch count.")
     p.add_argument(
