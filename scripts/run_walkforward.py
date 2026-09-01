@@ -1,6 +1,7 @@
-"""Walk-forward XGBoost over embargoed day-aligned folds.
+"""Walk-forward XGBoost or LSTM over embargoed day-aligned folds.
 
-  .venv/bin/python scripts/run_walkforward.py
+  .venv/bin/python scripts/run_walkforward.py --model xgb
+  .venv/bin/python scripts/run_walkforward.py --model lstm
 """
 
 from __future__ import annotations
@@ -28,12 +29,13 @@ from src.config import PARQUET_DIR
 from src.features import FEATURES
 from src.models.xgb_model import DEFAULT_PARAMS, predict_xgb, train_xgb
 from src.splits import WalkForwardSplitter
-from src.walkforward import run_walkforward
+from src.walkforward import run_walkforward, run_walkforward_lstm
 
 LABEL_COL = "label_tb"
 RESULTS_DIR = ROOT / "data" / "results"
-OUT_PATH = RESULTS_DIR / "xgb_wf.parquet"
-WANDB_GROUP = "walkforward-xgb"
+MODELS_DIR = ROOT / "data" / "models"
+XGB_OUT = RESULTS_DIR / "xgb_wf.parquet"
+LSTM_OUT = RESULTS_DIR / "lstm_wf.parquet"
 
 
 class XGBWalkForwardModel:
@@ -57,12 +59,30 @@ class XGBWalkForwardModel:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--model",
+        choices=("xgb", "lstm"),
+        default="xgb",
+        help="Which model family to walk-forward.",
+    )
     p.add_argument("--no-wandb", action="store_true", help="Skip W&B logging.")
     p.add_argument(
         "--max-folds",
         type=int,
         default=None,
         help="Optional cap on number of folds (debug).",
+    )
+    p.add_argument(
+        "--hidden-size",
+        type=int,
+        default=32,
+        help="LSTM hidden size (default 32 for CPU; use 64 if you have a GPU).",
+    )
+    p.add_argument("--epochs", type=int, default=20, help="LSTM max epochs.")
+    p.add_argument(
+        "--summarize-only",
+        action="store_true",
+        help="Load existing results parquet and only print/log metrics.",
     )
     return p.parse_args()
 
@@ -146,51 +166,32 @@ def _aggregate_metrics(per_fold: list[dict[str, float]]) -> dict[str, float]:
     return out
 
 
-def main() -> None:
-    args = _parse_args()
-    df = _load_all_features()
-    splitter = WalkForwardSplitter(
-        n_train_days=10,
-        n_test_days=1,
-        embargo_bars=100,
-        step_days=1,
-    )
-    n_folds = splitter.n_folds(df)
-    print(f"Loaded {df.height:,} rows across {len(splitter.unique_days(df))} days")
-    print(f"Walk-forward folds: {n_folds}")
+def _cap_splitter(splitter: WalkForwardSplitter, max_folds: int | None):
+    if max_folds is None:
+        return splitter
 
-    # Optional fold cap via wrapping splitter for debug runs.
-    if args.max_folds is not None:
+    class _CappedSplitter:
+        def __init__(self, inner: WalkForwardSplitter, n: int) -> None:
+            self.inner = inner
+            self.n = n
 
-        class _CappedSplitter:
-            def __init__(self, inner: WalkForwardSplitter, max_folds: int) -> None:
-                self.inner = inner
-                self.max_folds = max_folds
+        def split(self, frame: pl.DataFrame):
+            for i, pair in enumerate(self.inner.split(frame)):
+                if i >= self.n:
+                    break
+                yield pair
 
-            def split(self, frame: pl.DataFrame):
-                for i, pair in enumerate(self.inner.split(frame)):
-                    if i >= self.max_folds:
-                        break
-                    yield pair
+    return _CappedSplitter(splitter, max_folds)
 
-        active_splitter = _CappedSplitter(splitter, args.max_folds)
-    else:
-        active_splitter = splitter
 
-    def xgb_factory() -> XGBWalkForwardModel:
-        return XGBWalkForwardModel(params=DEFAULT_PARAMS)
-
-    preds = run_walkforward(
-        model_factory=xgb_factory,
-        splitter=active_splitter,
-        df=df,
-        features=FEATURES,
-        label_col=LABEL_COL,
-    )
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    preds.to_parquet(OUT_PATH, index=False)
-    print(f"Wrote {OUT_PATH} ({len(preds):,} rows)")
-
+def _log_and_summarize(
+    preds: pd.DataFrame,
+    *,
+    model_name: str,
+    wandb_group: str,
+    config: dict,
+    use_wandb: bool,
+) -> None:
     per_fold: list[dict[str, float]] = []
     print("\n=== Per-fold metrics ===")
     print(f"{'fold':>4} {'acc':>8} {'logloss':>10} {'macroF1':>10} {'auc':>8} {'n':>10}")
@@ -201,14 +202,14 @@ def main() -> None:
             f"{int(fold):4d} {m['accuracy']:8.4f} {m['log_loss']:10.4f} "
             f"{m['macro_f1']:10.4f} {m['auc_up_vs_down']:8.4f} {m['n']:10d}"
         )
-        if not args.no_wandb:
+        if use_wandb:
             run = wandb.init(
                 project="mnq-microstructure",
-                name=f"xgb-wf-fold{int(fold)}",
-                group=WANDB_GROUP,
+                name=f"{model_name}-wf-fold{int(fold)}",
+                group=wandb_group,
                 job_type="fold",
-                config={**DEFAULT_PARAMS, "fold": int(fold)},
-                reinit=True,
+                config={**config, "fold": int(fold)},
+                settings=wandb.Settings(init_timeout=300),
             )
             wandb.log(m)
             run.finish()
@@ -218,14 +219,14 @@ def main() -> None:
     for k, v in agg.items():
         print(f"  {k}: {v:.6g}" if isinstance(v, float) else f"  {k}: {v}")
 
-    if not args.no_wandb:
+    if use_wandb:
         run = wandb.init(
             project="mnq-microstructure",
-            name="xgb-wf-aggregate",
-            group=WANDB_GROUP,
+            name=f"{model_name}-wf-aggregate",
+            group=wandb_group,
             job_type="aggregate",
-            config=DEFAULT_PARAMS,
-            reinit=True,
+            config=config,
+            settings=wandb.Settings(init_timeout=300),
         )
         wandb.log(agg)
         table = wandb.Table(
@@ -244,6 +245,85 @@ def main() -> None:
         )
         wandb.log({"per_fold_metrics": table})
         run.finish()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    if args.model == "xgb":
+        out_path = XGB_OUT
+        wandb_group = "walkforward-xgb"
+        config: dict = {**DEFAULT_PARAMS}
+    else:
+        out_path = LSTM_OUT
+        wandb_group = "walkforward-lstm"
+        config = {
+            "hidden_size": args.hidden_size,
+            "epochs": args.epochs,
+            "seq_len": 50,
+        }
+
+    if args.summarize_only:
+        if not out_path.exists():
+            raise FileNotFoundError(
+                f"No results at {out_path}. Run walk-forward training first."
+            )
+        preds = pd.read_parquet(out_path)
+        print(f"Loaded {out_path} ({len(preds):,} rows)")
+        _log_and_summarize(
+            preds,
+            model_name=args.model,
+            wandb_group=wandb_group,
+            config=config,
+            use_wandb=not args.no_wandb,
+        )
+        return
+
+    df = _load_all_features()
+    splitter = WalkForwardSplitter(
+        n_train_days=10,
+        n_test_days=1,
+        embargo_bars=100,
+        step_days=1,
+    )
+    active = _cap_splitter(splitter, args.max_folds)
+    print(f"Loaded {df.height:,} rows across {len(splitter.unique_days(df))} days")
+    print(f"Walk-forward folds: {splitter.n_folds(df)}"
+          + (f" (capped to {args.max_folds})" if args.max_folds else ""))
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if args.model == "xgb":
+        def xgb_factory() -> XGBWalkForwardModel:
+            return XGBWalkForwardModel(params=DEFAULT_PARAMS)
+
+        preds = run_walkforward(
+            model_factory=xgb_factory,
+            splitter=active,
+            df=df,
+            features=FEATURES,
+            label_col=LABEL_COL,
+        )
+    else:
+        preds = run_walkforward_lstm(
+            splitter=active,
+            df=df,
+            features=FEATURES,
+            label_col=LABEL_COL,
+            epochs=args.epochs,
+            hidden_size=args.hidden_size,
+            models_dir=MODELS_DIR,
+        )
+
+    preds.to_parquet(out_path, index=False)
+    print(f"Wrote {out_path} ({len(preds):,} rows)")
+    _log_and_summarize(
+        preds,
+        model_name=args.model,
+        wandb_group=wandb_group,
+        config=config,
+        use_wandb=not args.no_wandb,
+    )
 
 
 if __name__ == "__main__":

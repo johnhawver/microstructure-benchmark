@@ -116,15 +116,14 @@ class SequenceDataset(Dataset):
         if n < L:
             return np.array([], dtype=np.int64)
 
-        valid: list[int] = []
-        for t in range(L - 1, n):
-            window = self.X[t - L + 1 : t + 1]
-            if not np.isfinite(window).all():
-                continue
-            if self.y[t] not in (0, 1, 2):
-                continue
-            valid.append(t)
-        return np.asarray(valid, dtype=np.int64)
+        # Vectorized: window [t-L+1, t] is finite iff no bad rows in that span.
+        finite_row = np.isfinite(self.X).all(axis=1)
+        bad = (~finite_row).astype(np.int32)
+        csum = np.concatenate([[0], np.cumsum(bad)])
+        t = np.arange(L - 1, n, dtype=np.int64)
+        bad_in_window = csum[t + 1] - csum[t - L + 1]
+        label_ok = (self.y[t] >= 0) & (self.y[t] <= 2)
+        return t[(bad_in_window == 0) & label_ok]
 
     def __len__(self) -> int:
         return int(self.valid_indices.shape[0])
@@ -218,6 +217,8 @@ def train_lstm(
     num_workers: int = 2,
     patience: int = 3,
     device: str | torch.device | None = None,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = NUM_LAYERS,
 ) -> MNQLSTM:
     """Train ``MNQLSTM`` with Adam + CrossEntropy; early-stop on val loss.
 
@@ -246,7 +247,10 @@ def train_lstm(
         pin_memory=device.type == "cuda",
     )
 
-    model = MNQLSTM().to(device)
+    model = MNQLSTM(
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+    ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
