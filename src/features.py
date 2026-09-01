@@ -201,11 +201,9 @@ def add_spread_features(lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def build_feature_frame(day: str) -> pl.DataFrame:
-    """Run the full one-day feature pipeline; return ts_event + FEATURES + mid."""
-    d1 = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
-    mbp = add_mid_and_spread(load_mbp1(day, d1))
-    bars = resample_to_bars(mbp, BAR_MS)
+def build_features_from_mbp(mbp: pl.LazyFrame, bar_ms: int = BAR_MS) -> pl.DataFrame:
+    """Run the full feature pipeline on pre-loaded MBP-1 (mid/spread columns)."""
+    bars = resample_to_bars(mbp, bar_ms)
     ofi_100 = aggregate_ofi_to_bars(compute_ofi_events(mbp), 100)
     lf = (
         bars.join(ofi_100, on="ts_event", how="left")
@@ -223,3 +221,10 @@ def build_feature_frame(day: str) -> pl.DataFrame:
     lf = add_trade_imbalance(lf, [10, 50, 200])
     lf = add_kyle_lambda(lf, 50)
     return lf.select(["ts_event", "mid", *FEATURES]).collect()
+
+
+def build_feature_frame(day: str) -> pl.DataFrame:
+    """Run the full one-day feature pipeline; return ts_event + FEATURES + mid."""
+    d1 = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    mbp = add_mid_and_spread(load_mbp1(day, d1))
+    return build_features_from_mbp(mbp)

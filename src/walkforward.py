@@ -62,6 +62,8 @@ def run_walkforward(
     features: Sequence[str],
     label_col: str = "label_tb",
     val_frac: float = 0.2,
+    shuffle_train_labels: bool = False,
+    shuffle_seed: int = 0,
 ) -> pd.DataFrame:
     """Train a fresh model per fold; return long-form out-of-sample predictions.
 
@@ -93,10 +95,14 @@ def run_walkforward(
             continue
 
         tr_idx, va_idx = _time_split_train_val(train_idx, val_frac=val_frac)
+        y_tr = y_all[tr_idx].copy()
+        if shuffle_train_labels:
+            rng = np.random.default_rng(shuffle_seed + fold)
+            rng.shuffle(y_tr)
         model = model_factory()
         model.fit(
             X_all[tr_idx],
-            y_all[tr_idx],
+            y_tr,
             X_all[va_idx],
             y_all[va_idx],
         )
