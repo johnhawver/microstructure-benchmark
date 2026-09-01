@@ -1,4 +1,4 @@
-"""Build all Day 29 results figures for notebooks/03_results.ipynb.
+"""Build results figures for notebooks/03_results.ipynb.
 
   .venv/bin/python scripts/build_results_figures.py
 """

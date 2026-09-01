@@ -106,7 +106,7 @@ def test_embargo_bars_stripped_from_train(splitter: WalkForwardSplitter):
     assert test_idx.min() > embargo_idx.max()
 
 
-def test_n_folds_on_plan_config(splitter: WalkForwardSplitter):
+def test_n_folds_default_window(splitter: WalkForwardSplitter):
     df = _synth_bars(n_days=15, bars_per_day=20)
     assert splitter.n_folds(df) == 5
     assert sum(1 for _ in splitter.split(df)) == 5

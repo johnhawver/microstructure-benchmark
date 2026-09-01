@@ -1,7 +1,7 @@
 """Run trading simulation on walk-forward predictions.
 
-Default: latency/threshold sweep (Day 27).
-Quick mode: single run per model (Day 26 style).
+Default: latency/threshold sweep.
+Quick mode: single run per model.
 
   .venv/bin/python scripts/run_simulation.py --no-wandb
   .venv/bin/python scripts/run_simulation.py --quick --no-wandb
