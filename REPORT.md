@@ -137,13 +137,13 @@ See `notebooks/figures/fig04_equity_curves.png` and `fig05_latency_heatmap.png`.
 
 Measured on project hardware (CPU). Bar budget = **100 ms** = 100,000 µs.
 
-| Stage | p50 (µs) | p95 (µs) | p99 (µs) |
-|---|---:|---:|---:|
-| Feature compute | 1,065 | 2,237 | **3,897** |
-| XGB inference | 156 | 661 | 2,564 |
-| LSTM inference | 497 | 2,270 | 5,141 |
+| Stage | p50 (µs) | p95 (µs) | p99 (µs) | Iters |
+|---|---:|---:|---:|---:|
+| Feature compute | 1,843 | 2,492 | **2,830** | 200 |
+| XGB inference | 166 | 428 | 2,036 | 10,000 |
+| LSTM inference | 633 | 1,573 | **3,674** | 10,000 |
 
-Feature compute is the largest stage at p99 (~3.9% of bar budget). LSTM inference is ~2× slower than XGB at p99. All stages are deployable at 100 ms; **alpha, not compute, is the binding constraint**.
+Every stage sits far inside the bar budget: the slowest (LSTM inference) uses **3.7% of the bar at p99**, and feature compute — the heaviest stage at p50 — costs 2.8%. LSTM inference is ~1.8× slower than XGB at p99. All stages are comfortably deployable at 100 ms; **alpha, not compute, is the binding constraint**.
 
 ## What I'd do next
 

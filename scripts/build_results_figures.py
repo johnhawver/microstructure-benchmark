@@ -46,7 +46,10 @@ def fold_metrics(g: pd.DataFrame) -> dict:
     y_cls = _signed_to_cls(g["y_true"].to_numpy())
     probs = np.column_stack(
         [g["prob_down"].to_numpy(), g["prob_zero"].to_numpy(), g["prob_up"].to_numpy()]
-    )
+    ).astype(np.float64)
+    # Model outputs are float32, so rows sum to 1 only to ~1e-7. Renormalize in
+    # float64 so log_loss does not warn about probabilities not summing to one.
+    probs /= probs.sum(axis=1, keepdims=True)
     y_pred = probs.argmax(axis=1)
     mask = y_cls != 1
     if mask.sum() >= 2 and len(np.unique(y_cls[mask])) == 2:
@@ -242,10 +245,23 @@ def fig06_inference_p99(out: Path = FIG_DIR / "fig06_inference_p99.png") -> None
     ax.bar(x + w, lat["p99_us"], width=w, label="p99")
     ax.set_xticks(x)
     ax.set_xticklabels(lat["stage"], rotation=15, ha="right")
-    ax.set_ylabel("latency (µs)")
-    ax.set_title("Per-stage latency")
-    ax.axhline(100_000, color="gray", linestyle="--", linewidth=0.8)
-    ax.legend()
+    ax.set_ylabel("latency (µs, log scale)")
+    ax.set_title("Per-stage latency vs 100 ms bar budget")
+    # Log scale: stages run ~1e2-1e3 us against a 1e5 us budget, so a linear
+    # axis flattens every bar to the baseline and hides the p50/p95/p99 spread.
+    ax.set_yscale("log")
+    ax.set_ylim(100, 200_000)
+    ax.axhline(100_000, color="crimson", linestyle="--", linewidth=1.0)
+    ax.text(
+        len(lat) - 0.5,
+        100_000,
+        " 100 ms bar budget",
+        color="crimson",
+        va="bottom",
+        ha="right",
+        fontsize=9,
+    )
+    ax.legend(loc="upper left", framealpha=0.9)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches="tight")

@@ -43,7 +43,10 @@ def _fold_metrics_from_probs(g: pd.DataFrame) -> dict[str, float]:
     y_cls = _signed_to_cls(g["y_true"].to_numpy())
     probs = np.column_stack(
         [g["prob_down"].to_numpy(), g["prob_zero"].to_numpy(), g["prob_up"].to_numpy()]
-    )
+    ).astype(np.float64)
+    # Model outputs are float32, so rows sum to 1 only to ~1e-7. Renormalize in
+    # float64 so log_loss does not warn about probabilities not summing to one.
+    probs /= probs.sum(axis=1, keepdims=True)
     y_pred = probs.argmax(axis=1)
     mask = y_cls != 1
     if mask.sum() >= 2 and len(np.unique(y_cls[mask])) == 2:
